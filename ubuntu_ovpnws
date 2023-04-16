@@ -376,6 +376,8 @@ echo "Installing iptables."
 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 sysctl -p
 {
+iptables -F
+iptables -t nat -A PREROUTING -i eth0 -p udp -m udp --dport 10000:50000 -j DNAT --to-destination :5666
 iptables -t nat -A POSTROUTING -s 10.20.0.0/22 -o "$server_interface" -j MASQUERADE
 iptables -t nat -A POSTROUTING -s 10.20.0.0/22 -o "$server_interface" -j SNAT --to-source "$server_ip"
 iptables -t nat -A POSTROUTING -s 10.30.0.0/22 -o "$server_interface" -j MASQUERADE
@@ -475,6 +477,52 @@ install_sudo(){
   }&>/dev/null
 }
 
+install_hysteria(){
+clear
+echo 'Installing hysteria.'
+{
+wget -N --no-check-certificate -q -O ~/install_server.sh https://raw.githubusercontent.com/apernet/hysteria/master/install_server.sh; chmod +x ~/install_server.sh; ./install_server.sh
+
+rm -f /etc/hysteria/config.json
+
+echo '{
+  "listen": ":5666",
+  "cert": "/etc/openvpn/easy-rsa/keys/server.crt",
+  "key": "/etc/openvpn/easy-rsa/keys/server.key",
+  "up_mbps": 100,
+  "down_mbps": 100,
+  "disable_udp": false,
+  "obfs": "firenet",
+  "auth": {
+    "mode": "passwords",
+    "config": ["firenet1", "firenetdev"]
+  },
+  "recv_window_conn": 107374182400,
+  "recv_window_client": 13421772800
+}
+' >> /etc/hysteria/config.json
+
+chmod 755 /etc/hysteria/config.json
+
+sysctl -w net.core.rmem_max=16777216
+sysctl -w net.core.wmem_max=16777216
+
+wget -O /usr/bin/badvpn-udpgw "http://firenetvpn.net/script/badvpn-udpgw64"
+chmod +x /usr/bin/badvpn-udpgw
+} &>/dev/null
+}
+
+installBBR() {
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+    
+    apt install -y linux-generic-hwe-20.04
+    grub-set-default 0
+    echo "tcp_bbr" >> /etc/modules-load.d/modules.conf
+    INSTALL_BBR=true
+}
+
 install_rclocal(){
   {
   sed -i 's/Listen 80/Listen 81/g' /etc/apache2/ports.conf
@@ -504,7 +552,9 @@ sysctl -p
 service stunnel4 restart
 systemctl restart openvpn@server.service
 systemctl restart openvpn@server2.service
+systemctl restart hysteria-server.service
 screen -dmS socks python /etc/socks.py 80
+ps x | grep 'udpvpn' | grep -v 'grep' || screen -dmS udpvpn /usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 10000 --max-connections-for-client 10 --client-socket-sndbuf 10000
 screen -dmS webinfo php -S 0.0.0.0:5623 -t /root/.web/
 bash /etc/.monitor openvpn
 exit 0' >> /etc/rc.local
@@ -520,6 +570,7 @@ echo "tcp_port=TCP_PORT
 udp_port=UDP_PORT
 socket_port=80
 squid_port=8080
+hysteria_port=5666
 tcp_ssl_port=443
 udp_ssl_port=442" >> /root/.ports
 
@@ -545,7 +596,7 @@ clear
 echo '++++++++++++++++++++++++++++++++++'
 echo '*       OPENVPN  is ready!    *'
 echo '+++++++++++************+++++++++++'
-echo -e "[IP] : $server_ip\n[Openvpn TCP Port] : $PORT_TCP\n[Openvpn UDP Port] : $PORT_UDP\n[Ssl Port] : 443\n[Proxy Socks ] : 80\n[Proxy Squid 1] : 8080\n[Proxy Squid 2] : 3128\n"
+echo -e "[IP] : $server_ip\n[Openvpn TCP Port] : $PORT_TCP\n[Openvpn UDP Port] : $PORT_UDP\n[Ssl Port] : 443\n[Proxy Socks ] : 80\n[Hysteria Port ] : 5666\n[Proxy Squid 1] : 8080\n[Proxy Squid 2] : 3128\n"
 history -c;
 rm /etc/.systemlink
 echo 'Server will secure this server and reboot after 20 seconds'
@@ -558,6 +609,8 @@ server_interface=$(ip route get 8.8.8.8 | awk '/dev/ {f=NR} f&&NR-1==f' RS=" ")
 
 install_require
 install_sudo  
+install_hysteria
+installBBR
 install_squid
 install_openvpn
 install_firewall_kvm
